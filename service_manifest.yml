@@ -1,0 +1,107 @@
+name: BashSim
+version: $SERVICE_TAG
+description: >
+  Symbolically emulates a bash script's grammar (loops, variable substitution, safe
+  base64/text-transform decoding) WITHOUT ever executing it, to reveal dynamically-built
+  commands/URLs a flat regex would miss, then performs a real, SSRF-guarded fetch of any
+  resolved network command via the same logic PayloadFetcher uses.
+
+accepts: code/shell
+rejects: empty|metadata/.*
+
+stage: SECONDARY
+category: Static Analysis
+file_required: true
+timeout: 120
+disable_cache: false
+enabled: true
+is_external: false
+licence_count: 0
+
+submission_params:
+  - name: max_loop_iterations
+    type: int
+    default: 200
+    value: 200
+  - name: max_recursion_depth
+    type: int
+    default: 25
+    value: 25
+  - name: max_urls
+    type: int
+    default: 10
+    value: 10
+  - name: fetch_timeout_seconds
+    type: int
+    default: 10
+    value: 10
+  - name: max_download_size_mb
+    type: int
+    default: 25
+    value: 25
+  - name: max_redirects
+    type: int
+    default: 3
+    value: 3
+  - name: user_agent
+    type: str
+    default: "Mozilla/5.0 (AssemblyLine BashSim)"
+    value: "Mozilla/5.0 (AssemblyLine BashSim)"
+  - name: simulate_downloads_only
+    type: bool
+    default: true
+    value: true
+
+heuristics:
+  - heur_id: 1
+    name: Fetched payload from resolved command
+    description: Successfully retrieved live content referenced by a symbolically-resolved network command.
+    filetype: ".*"
+    score: 100
+    max_score: 1000
+    signature_score_map:
+      executable: 500
+      script: 400
+      webshell_or_html: 200
+      other: 100
+    attack_id: T1105
+  - heur_id: 2
+    name: Multi-architecture loader pattern
+    description: Four or more architecture-specific payload URLs resolved on a single host (Mirai/Gafgyt-style loader shape).
+    filetype: ".*"
+    score: 300
+    attack_id: T1105
+  - heur_id: 3
+    name: Exfiltration pattern recognized
+    description: The script sends local data to a remote host (e.g. curl -F/--data) -- recognized, never actually sent.
+    filetype: ".*"
+    score: 400
+    attack_id: T1041
+  - heur_id: 4
+    name: Persistence/system-mutation command recognized
+    description: A persistence or system-mutation command (cron, useradd, systemctl, iptables, chattr, etc.) was recognized -- never performed.
+    filetype: ".*"
+    score: 300
+  - heur_id: 5
+    name: Direct execution of fetched/decoded content recognized
+    description: The script would execute a fetched or decoded payload (./x, bash x, eval, source) -- recognized, never performed.
+    filetype: ".*"
+    score: 400
+    attack_id: T1059.004
+  - heur_id: 6
+    name: SSRF-risk target blocked
+    description: A resolved URL (or a redirect target) resolved to a private/loopback/link-local/metadata address and was not fetched.
+    filetype: ".*"
+    score: 0
+  - heur_id: 7
+    name: Parse incomplete
+    description: bashlex could not fully parse this script -- results reflect only what was successfully parsed.
+    filetype: ".*"
+    score: 0
+
+docker_config:
+  image: kylemc54321/assemblyline-service-bashsim:$SERVICE_TAG
+  cpu_cores: 1
+  ram_mb_min: 128
+  ram_mb: 512
+  allow_internet_access: true

