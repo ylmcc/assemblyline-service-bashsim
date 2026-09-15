@@ -83,17 +83,6 @@ class BashSim(ServiceBase):
             parse_section.set_heuristic(7, signature="parse_incomplete")
             result.add_section(parse_section)
 
-        if ir.actions:
-            actions_table = ResultTableSection("Resolved actions")
-            for a in ir.actions:
-                actions_table.add_row(TableRow(
-                    kind=a.kind,
-                    command=a.command,
-                    args=" ".join(a.args) if a.resolved else "unresolved",
-                    conditional=a.conditional,
-                ))
-            result.add_section(actions_table)
-
         fetches = [a for a in ir.actions if a.kind == "network_fetch" and a.resolved and a.detail.get("url")]
 
         if has_multi_arch_pattern(fetches):
