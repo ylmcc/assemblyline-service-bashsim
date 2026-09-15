@@ -63,6 +63,8 @@ class BashSimInterpreter:
         self.script_text = ""
         self._parse_errors: list[str] = []
         self._truncated = False
+        self._functions: dict[str, "object"] = {}
+        self._function_called_directly: set[str] = set()
 
     def run(self, script_text: str) -> InterpretResult:
         self.script_text = script_text
@@ -102,6 +104,21 @@ class BashSimInterpreter:
         except Exception as e:  # bashlex can raise various errors on malformed/adversarial input
             return InterpretResult([], [f"parse failed: {e}"], False)
 
+        # First pass: register every user-defined function by name, and note which
+        # ones are ever invoked by a direct literal command name anywhere in the
+        # script. This lets _walk_command re-walk a function's body per call site
+        # with $1/$2/... bound to that call's actual arguments (see below), instead
+        # of the old behaviour of walking every function body exactly once, blind,
+        # at its definition point -- which could never resolve positional
+        # parameters to anything concrete. Functions never called by a direct
+        # literal name (indirect/dynamic dispatch, or genuinely dead code) fall
+        # back to that original blind-walk-at-definition behaviour, so nothing is
+        # silently dropped.
+        self._functions = {}
+        self._function_called_directly = set()
+        for tree in trees:
+            self._collect_functions_and_calls(tree)
+
         env: dict[str, SymValue] = {}
         for tree in trees:
             try:
@@ -111,6 +128,28 @@ class BashSimInterpreter:
 
         self._cross_reference_direct_execution(actions)
         return InterpretResult(actions, self._parse_errors, self._truncated)
+
+    def _collect_functions_and_calls(self, node):
+        """Pre-pass: populate self._functions (name -> function node) and
+        self._function_called_directly (names ever invoked as a plain literal
+        command word anywhere in the script). No resolution/env needed -- this
+        only looks at static structure."""
+        kind = node.kind
+        if kind == "function":
+            name_node = getattr(node, "name", None)
+            if name_node is not None and getattr(name_node, "word", None):
+                self._functions[name_node.word] = node
+            body = getattr(node, "body", None)
+            if body is not None:
+                self._collect_functions_and_calls(body)
+            return
+        if kind == "command":
+            words = [p for p in (getattr(node, "parts", None) or []) if p.kind == "word"]
+            if words and not (getattr(words[0], "parts", None)):
+                self._function_called_directly.add(words[0].word)
+            return
+        for child in (getattr(node, "parts", None) or getattr(node, "list", None) or []):
+            self._collect_functions_and_calls(child)
 
     # ---- AST walking ----------------------------------------------------
 
@@ -154,11 +193,26 @@ class BashSimInterpreter:
         elif kind in ("if", "while", "until"):
             self._walk_all_lists_conditional(node, env, actions, depth)
         elif kind == "command":
-            self._walk_command(node, env, actions, conditional)
+            self._walk_command(node, env, actions, conditional, depth)
         elif kind == "function":
-            body = getattr(node, "parts", None) or getattr(node, "list", None) or []
-            for child in body:
-                self._walk(child, dict(env), actions, True, depth + 1)
+            # Only blind-walk here if this function is never invoked by a direct
+            # literal command name anywhere in the script (see
+            # _collect_functions_and_calls) -- if it is, _walk_command re-walks
+            # its body per call site with real argument binding instead, which is
+            # strictly more informative than one unconditional blind pass.
+            name_node = getattr(node, "name", None)
+            name = getattr(name_node, "word", None) if name_node is not None else None
+            if name is not None and name in self._function_called_directly:
+                return
+            body = getattr(node, "body", None)
+            if body is not None:
+                self._walk(body, dict(env), actions, True, depth + 1)
+            else:
+                # Unexpected bashlex shape (no .body attribute) -- fall back to the
+                # old parts-iteration approach rather than silently dropping the
+                # function's contents.
+                for child in getattr(node, "parts", None) or []:
+                    self._walk(child, dict(env), actions, True, depth + 1)
         # other kinds (operator, reservedword, redirect, ...) have nothing to do standalone
 
     def _walk_all_lists_conditional(self, node, env, actions, depth):
@@ -167,9 +221,21 @@ class BashSimInterpreter:
         'list' node when there are multiple) unconditionally, but mark every action
         found as conditional=True, since we deliberately do not attempt to evaluate real
         runtime truth values."""
-        for p in getattr(node, "parts", None) or []:
-            if p.kind != "reservedword":
-                self._walk(p, dict(env), actions, True, depth + 1)
+        self._walk_conditional_parts(getattr(node, "parts", None) or [], env, actions, depth)
+
+    def _walk_conditional_parts(self, parts, env, actions, depth):
+        for p in parts:
+            if p.kind == "reservedword":
+                # bashlex quirk: a chain of 2+ elif/else branches gets the *second*
+                # and later branches nested as a raw list of further AST nodes
+                # inside a reservedword's .word attribute, instead of as normal
+                # sibling parts -- confirmed via direct inspection (a 4-elif+else
+                # chain nests recursively this way). Recurse into it (arbitrary
+                # depth) so branches beyond the first elif aren't silently dropped.
+                if isinstance(p.word, list):
+                    self._walk_conditional_parts(p.word, env, actions, depth)
+                continue
+            self._walk(p, dict(env), actions, True, depth + 1)
 
     def _walk_for(self, node, env, actions, conditional, depth):
         parts = getattr(node, "parts", None) or []
@@ -225,7 +291,7 @@ class BashSimInterpreter:
             child_env[var_name] = SymValue(None, False, "unresolved: loop list not statically resolvable")
         walk_body(child_env, True)
 
-    def _walk_command(self, node, env, actions, conditional):
+    def _walk_command(self, node, env, actions, conditional, depth=0):
         words = []
         for p in getattr(node, "parts", None) or []:
             if p.kind == "assignment":
@@ -243,7 +309,14 @@ class BashSimInterpreter:
 
         resolved = [self._resolve_word(w, env) for w in words]
         command_name = resolved[0].concrete if resolved[0].concrete is not None else "<unresolved>"
-        args = [r.concrete if (r.resolved and r.concrete is not None) else "<unresolved>" for r in resolved[1:]]
+        # Use concrete text whenever it's available, even if not every part of the
+        # word resolved (e.g. "https://217.60.103.56/$1" with $1 unresolved) --
+        # _resolve_spliced already spliced literal text around the unresolved
+        # fragment, so the static portion (an IP, a path, ...) must not be thrown
+        # away and replaced with an opaque "<unresolved>" token. `resolved`
+        # (all_resolved below) still correctly reflects that not everything in
+        # this action was concretely known.
+        args = [r.concrete if r.concrete is not None else "<unresolved>" for r in resolved[1:]]
         all_resolved = all(r.resolved for r in resolved)
 
         kind, detail = self._classify(command_name, args)
@@ -256,6 +329,22 @@ class BashSimInterpreter:
             raw_node_text=self._slice(node),
             detail=detail,
         ))
+
+        func_node = self._functions.get(command_name)
+        if func_node is not None:
+            body = getattr(func_node, "body", None)
+            if body is not None:
+                child_env = dict(env)
+                arg_values = resolved[1:]
+                for i, rv in enumerate(arg_values, start=1):
+                    child_env[str(i)] = rv
+                if arg_values:
+                    joined = " ".join(rv.concrete for rv in arg_values if rv.concrete is not None)
+                    all_args_resolved = all(rv.resolved for rv in arg_values)
+                    child_env["@"] = SymValue(joined, all_args_resolved, "resolved via call-site arguments")
+                    child_env["*"] = child_env["@"]
+                child_env["#"] = SymValue(str(len(arg_values)), True, "literal")
+                self._walk(body, child_env, actions, conditional, depth + 1)
 
     def _cross_reference_direct_execution(self, actions):
         fetch_by_path = {
