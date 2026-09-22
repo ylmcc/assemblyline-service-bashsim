@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import warnings
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 import requests
+from urllib3.exceptions import InsecureRequestWarning
 
 from .ssrf_guard import resolve_and_check
 
@@ -40,7 +42,15 @@ def fetch_url(
     max_size: int,
     max_redirects: int,
     user_agent: str,
+    verify_ssl: bool = False,
 ) -> FetchResult:
+    """Fetch `url`, following up to `max_redirects` redirects manually.
+
+    `verify_ssl` controls TLS certificate verification on every hop and defaults to False:
+    malware hosts routinely serve self-signed or expired certificates, and with
+    verification on the payload would never be retrieved. It changes nothing else -- the
+    per-hop SSRF check, redirect cap, size cap and timeouts apply identically either way.
+    """
     current_url = url
 
     for hop in range(max_redirects + 1):
@@ -55,15 +65,26 @@ def fetch_url(
             return FetchResult(False, current_url, None, None, None, 0, None, check.reason)
 
         try:
-            resp = requests.get(
-                current_url,
-                headers={"User-Agent": user_agent},
-                timeout=timeout,
-                stream=True,
-                allow_redirects=False,
-            )
+            with warnings.catch_warnings():
+                if not verify_ssl:
+                    # Verification was turned off on purpose; don't spam the logs with an
+                    # InsecureRequestWarning per hop. Scoped to this call, not process-wide.
+                    warnings.simplefilter("ignore", InsecureRequestWarning)
+                resp = requests.get(
+                    current_url,
+                    headers={"User-Agent": user_agent},
+                    timeout=timeout,
+                    stream=True,
+                    allow_redirects=False,
+                    verify=verify_ssl,
+                )
         except requests.exceptions.Timeout:
             return FetchResult(False, current_url, None, None, None, 0, None, "timeout")
+        except requests.exceptions.SSLError as e:
+            # Must precede ConnectionError (SSLError subclasses it). Reported separately so
+            # a certificate/handshake failure is not mistaken for a down host.
+            hint = " [certificate verification is ON; resubmit with verify_ssl=false to fetch anyway]" if verify_ssl else ""
+            return FetchResult(False, current_url, None, None, None, 0, None, f"ssl_error: {e}{hint}")
         except requests.exceptions.ConnectionError as e:
             return FetchResult(False, current_url, None, None, None, 0, None, f"connection_error: {e}")
         except requests.exceptions.RequestException as e:

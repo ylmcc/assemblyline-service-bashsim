@@ -61,10 +61,16 @@ class BashSim(ServiceBase):
         )
         ir = interp.run(text)
 
+        # verify_ssl defaults to false: malware hosts commonly use self-signed/expired
+        # certs, and verifying would stop the payload from ever being retrieved. The SSRF
+        # guard, redirect/size caps and timeouts are unaffected by this setting.
+        verify_ssl = bool(request.get_param("verify_ssl"))
+
         result = Result()
         audit_log = {
             "parse_errors": ir.parse_errors,
             "truncated": ir.truncated,
+            "verify_ssl": verify_ssl,
             "actions": [
                 {
                     "kind": a.kind, "command": a.command, "args": a.args,
@@ -131,6 +137,15 @@ class BashSim(ServiceBase):
 
         if fetches and not request.get_param("simulate_downloads_only"):
             fetch_table = ResultTableSection("Real fetches performed")
+            fetch_table.add_subsection(ResultSection(
+                "TLS certificate verification",
+                body=("Certificate verification was ON (verify_ssl=true); HTTPS targets with "
+                      "invalid, expired or self-signed certificates fail as 'ssl_error'."
+                      if verify_ssl else
+                      "Certificate verification was OFF (verify_ssl=false): TLS certificates of "
+                      "HTTPS targets were not validated, so invalid, expired or self-signed "
+                      "certificates do not block fetching."),
+            ))
             heur_fetch = None
             ssrf_blocked_urls = []
             for a in fetches:
@@ -141,6 +156,7 @@ class BashSim(ServiceBase):
                     request.get_param("max_download_size_mb") * 1024 * 1024,
                     request.get_param("max_redirects"),
                     request.get_param("user_agent"),
+                    verify_ssl=verify_ssl,
                 )
                 if not fr.ok:
                     fetch_table.add_row(TableRow(url=url, outcome="failed", reason=fr.error))
