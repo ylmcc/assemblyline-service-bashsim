@@ -1,2 +1,2 @@
-bashlex
+bashlex==0.18  # bashsim/bashlex_case.py rebinds this version's stubbed case-grammar actions
 requests

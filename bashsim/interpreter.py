@@ -18,6 +18,7 @@ from typing import Optional
 
 import bashlex
 
+from . import bashlex_case  # noqa: F401 -- installs `case ... esac` support into bashlex
 from . import text_transforms
 from .text_transforms import SAFE_TRANSFORM_COMMANDS, TransformError
 
@@ -192,6 +193,8 @@ class BashSimInterpreter:
             self._walk_for(node, env, actions, conditional, depth)
         elif kind in ("if", "while", "until"):
             self._walk_all_lists_conditional(node, env, actions, depth)
+        elif kind == "case":
+            self._walk_case(node, env, actions, depth)
         elif kind == "command":
             self._walk_command(node, env, actions, conditional, depth)
         elif kind == "function":
@@ -222,6 +225,20 @@ class BashSimInterpreter:
         found as conditional=True, since we deliberately do not attempt to evaluate real
         runtime truth values."""
         self._walk_conditional_parts(getattr(node, "parts", None) or [], env, actions, depth)
+
+    def _walk_case(self, node, env, actions, depth):
+        """`case WORD in pat) body ;; ... esac` (node shape: see bashlex_case.py).
+        Like if/while, pattern matching is never evaluated: every arm's body is
+        walked (each with its own copy of env), and everything found is marked
+        conditional=True. The subject word and the patterns themselves are skipped
+        -- only arm bodies contain commands."""
+        for arm in getattr(node, "parts", None) or []:
+            if arm.kind != "pattern":
+                continue
+            for p in getattr(arm, "parts", None) or []:
+                if p.kind in ("word", "reservedword"):
+                    continue
+                self._walk(p, dict(env), actions, True, depth + 1)
 
     def _walk_conditional_parts(self, parts, env, actions, depth):
         for p in parts:

